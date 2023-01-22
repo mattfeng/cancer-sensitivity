@@ -3,6 +3,7 @@
 
 import pickle
 from datetime import datetime
+import argparse
 
 from tqdm import tqdm
 
@@ -14,6 +15,7 @@ from torch.utils.data import Dataset, DataLoader
 
 from torch_geometric.nn import GCNConv, global_mean_pool
 from torch_geometric.data import Data, Batch
+
 
 # dataset
 class SensitivityDataset(Dataset):
@@ -50,7 +52,6 @@ class SensitivityDataset(Dataset):
         atoms = torch.tensor(self.drug_to_features[drug_id]["atoms"]).float()
         bonds = torch.tensor(self.drug_to_features[drug_id]["bonds"])
         mol_graph = Data(x=atoms, edge_index=bonds)
-        
         
         ln_ic50 = row["ln_IC50"]
         return (gexpr, mol_graph), ln_ic50
@@ -101,6 +102,10 @@ class MoleculeEncoder(nn.Module):
         
         return x
 
+
+# In[5]:
+
+
 # sensitivity model
 class SensitivityPredictor(nn.Module):
     def __init__(self, mol_dim, num_genes):
@@ -126,12 +131,23 @@ class SensitivityPredictor(nn.Module):
         
         return out
 
-def training_loop(model, optimizer, num_epochs):
+
+# In[ ]:
+
+
+def training_loop(model, optimizer, num_epochs, device="cpu"):
+    model.train()
+    model.to(device=device)
+
     for epoch in range(1, num_epochs + 1):
         total_loss = 0
         num_batches = 0
         
         for (gexprs, molgraphs), target in tqdm(train_loader):
+            gexprs = gexprs.to(device=device)
+            molgraphs = molgraphs.to(device=device)
+            target = target.to(device=device)
+
             pred = model(gexprs, molgraphs).squeeze()
             
             optimizer.zero_grad()
@@ -140,25 +156,33 @@ def training_loop(model, optimizer, num_epochs):
             optimizer.step()
             
             num_batches += 1
-            total_loss += loss.detach().item()
+            total_loss += loss.cpu().detach().item()
         
         avg_loss = total_loss / num_batches
         
         print(f"Epoch {epoch}, Loss {avg_loss}")
-        
 
-with open("./drug_response_with_cell_line.pkl", "rb") as fin:
-    sensitivity_data = pickle.load(fin)
+if __name__ == "__main__":
+    with open("./drug_response_with_cell_line.pkl", "rb") as fin:
+        sensitivity_data = pickle.load(fin)
+        
+    with open("./cell_line_gexpr.pkl", "rb") as fin:
+        cell_line_to_gene_expr = pickle.load(fin)
+        
+    with open("./drugid_to_molecular_graphs.pkl", "rb") as fin:
+        drug_to_features = pickle.load(fin)
     
-with open("./cell_line_gexpr.pkl", "rb") as fin:
-    cell_line_to_gene_expr = pickle.load(fin)
-    
-with open("./drugid_to_molecular_graphs.pkl", "rb") as fin:
-    drug_to_features = pickle.load(fin)
-    
-dataset = SensitivityDataset(sensitivity_data, cell_line_to_gene_expr, drug_to_features)
-train_loader = DataLoader(dataset, batch_size=64, collate_fn=SensitivityDataset.collate, shuffle=True)
-model = SensitivityPredictor(32, 17419)
-optimizer = optim.Adam(model.parameters(), lr=1e-4)
-# 3e-5: 4.8
-training_loop(model, optimizer, 100)
+    dataset = SensitivityDataset(sensitivity_data, cell_line_to_gene_expr, drug_to_features)
+    train_loader = DataLoader(dataset, batch_size=2048, collate_fn=SensitivityDataset.collate, shuffle=True)
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--lr", type=float, default="1e-3")
+    parser.add_argument("--device", default="cpu")
+    args = parser.parse_args()
+
+    print(f"training on device: {args.device}")
+    print(f"learning rate: {args.lr}")
+
+    model = SensitivityPredictor(32, 17419)
+    optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    training_loop(model, optimizer, 100, device=args.device)
